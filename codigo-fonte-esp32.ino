@@ -1,107 +1,163 @@
-const int ledVerde = 4; 
-const int ledVermelho = 7;
-const int ledAmarelo = 3;
-const int portaBotao = 2; 
-const int trigPin = 9;
-const int echoPin = 10;
-long duration;
-int distance;
-int distanciaDefinida = -1; 
+#include <WiFi.h>
+#include <PubSubClient.h>
 
-void setup() {
-  configurarPinos();
-}
+// Dados da rede Wi-Fi
+const char* ssid = "brisa-1570583";
+const char* password = "uq1uyi0i";
 
-void loop() {
-    handleDistanciaDefinida();
-    handleBotaoCalibragemPressionado();
-}
+// Configuração do broker MQTT
+const char* mqtt_server = "broker.hivemq.com";
+const int mqtt_port = 1883;
+const char* mqtt_topic_receive = "consulta/volume";
+const char* mqtt_topic_send = "resposta/volume";
 
-void handleBotaoCalibragemPressionado(){
-  if (isBotaoPressionado()) {
-    definirDistancia();
-  }
-}
+// Identificador único da lixeira
+const char* lixeira_id = "lixeira_01";
 
-void handleDistanciaDefinida(){
-  if (!isDistanciaDefinida()) {
-    digitalWrite(ledVermelho, HIGH);
+// Pinos do sensor e LEDs
+const int trigPin = 26;
+const int echoPin = 27;
+const int ledVermelho = 18;
+const int ledAmarelo = 19;
+const int ledVerde = 21;
+
+float distancia;
+String ultimoStatus = "";  // Status anterior da lixeira
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+unsigned long lastMeasureTime = 0;
+const unsigned long interval = 500; // intervalo entre leituras
+
+// Gera status com base na distância
+String obterStatus(float d) {
+  if (d < 20.0 || d > 450.0) {
+    return "Lixeira cheia";
+  } else if (d < 30.0) {
+    return "Lixeira com meio volume";
   } else {
-    verificarDistancia();
-    digitalWrite(ledVermelho, LOW);
+    return "Lixeira vazia";
   }
 }
 
-// Função para configurar os pinos
-void configurarPinos() {
-  pinMode(ledVerde, OUTPUT);  
-  pinMode(ledVermelho, OUTPUT);
-  pinMode(ledAmarelo, OUTPUT);
-  pinMode(portaBotao, INPUT); 
-  pinMode(trigPin, OUTPUT);
-  pinMode(echoPin, INPUT);
-  Serial.begin(9600);
+// Callback para mensagens recebidas
+void callback(char* topic, byte* payload, unsigned int length) {
+  String msg = "";
+  for (int i = 0; i < length; i++) {
+    msg += (char)payload[i];
+  }
+
+  if (String(topic) == mqtt_topic_receive && msg == "consultar") {
+    String status = obterStatus(distancia);
+    String payload = "ID: " + String(lixeira_id) + 
+                     ", Distância: " + String(distancia) + 
+                     " cm, Status: " + status;
+    client.publish(mqtt_topic_send, payload.c_str());
+  }
 }
 
-// Função para verificar se o botão foi pressionado
-bool isBotaoPressionado() {
-  return digitalRead(portaBotao) == HIGH;
+void conectarWiFi() {
+  WiFi.begin(ssid, password);
+  Serial.print("Conectando-se ao Wi-Fi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nConectado ao Wi-Fi!");
+  Serial.print("IP local: ");
+  Serial.println(WiFi.localIP());
 }
 
-bool isDistanciaDefinida() {
-  return distanciaDefinida != -1;
+void conectarMQTT() {
+  while (!client.connected()) {
+    Serial.print("Conectando ao MQTT... ");
+    String clientId = "ESP32Client-" + String(random(0xffff), HEX);
+    if (client.connect(clientId.c_str())) {
+      Serial.println("conectado!");
+      client.subscribe(mqtt_topic_receive);
+    } else {
+      Serial.print("falhou, rc=");
+      Serial.print(client.state());
+      Serial.println(" tentando novamente em 5 segundos");
+      delay(5000);
+    }
+  }
 }
 
-// Função para medir e imprimir a distância
-void medirEImprimirDistancia() {
+void medirDistancia() {
   digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
   digitalWrite(trigPin, HIGH);
   delayMicroseconds(10);
   digitalWrite(trigPin, LOW);
-
-  duration = pulseIn(echoPin, HIGH);
-  distance = duration * 0.034 / 2;
+  unsigned long tempoSom = pulseIn(echoPin, HIGH);
+  distancia = tempoSom / 58.0;
 }
 
-// Medir a distância do sensor ate o ponto maximo
-void definirDistancia() {
-  medirEImprimirDistancia(); 
-  distanciaDefinida = distance;
-  Serial.print("Distancia definida: ");
-  Serial.print(distanciaDefinida);
-  Serial.println(" cm");
-  digitalWrite(ledVerde, HIGH);;
-}
-
-// Função para ativar o LED amarelo
-void ativarLedAmarelo() {
-  digitalWrite(ledAmarelo, HIGH);
-}
-
-// Normalizar porcentagem para que nunca passe de 100% ou seja menor ou igual a 0%
-float normalizePorcentagem(float porcentagem) {
-  if (porcentagem > 100) {
-    return 100;
-  } else if (porcentagem <= 0) {
-    return 0;
+void atualizarLEDs(String status) {
+  if (status == "Lixeira cheia") {
+    digitalWrite(ledVerde, LOW);
+    digitalWrite(ledAmarelo, LOW);
+    digitalWrite(ledVermelho, HIGH);
+  } else if (status == "Lixeira com meio volume") {
+    digitalWrite(ledVerde, LOW);
+    digitalWrite(ledAmarelo, HIGH);
+    digitalWrite(ledVermelho, LOW);
   } else {
-    return porcentagem;
+    digitalWrite(ledVerde, HIGH);
+    digitalWrite(ledAmarelo, LOW);
+    digitalWrite(ledVermelho, LOW);
   }
 }
 
-// Função para verificar a distância do objeto em relação à definida
-void verificarDistancia() {
-  medirEImprimirDistancia(); 
-  float porcentagem = normalizePorcentagem((1 - (float(distance) / distanciaDefinida)) * 100);
+void setup() {
+  Serial.begin(115200);
 
-  Serial.print("Distancia atual: ");
-  Serial.print(distance);
-  Serial.println(" cm");
+  pinMode(ledVermelho, OUTPUT);
+  pinMode(ledAmarelo, OUTPUT);
+  pinMode(ledVerde, OUTPUT);
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
 
-  Serial.print("Porcentagem em relacao a distancia definida: ");
-  Serial.print(porcentagem);
-  Serial.println(" %");
+  conectarWiFi();
 
-  delay(1000);
+  client.setServer(mqtt_server, mqtt_port);
+  client.setCallback(callback);
+  conectarMQTT();
+}
+
+void loop() {
+  if (WiFi.status() != WL_CONNECTED) {
+    conectarWiFi();
+  }
+
+  if (!client.connected()) {
+    conectarMQTT();
+  }
+
+  client.loop();
+
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastMeasureTime >= interval) {
+    lastMeasureTime = currentMillis;
+
+    medirDistancia();
+    String statusAtual = obterStatus(distancia);
+
+    atualizarLEDs(statusAtual);
+
+    Serial.print("Distância: ");
+    Serial.print(distancia);
+    Serial.print(" cm | Status: ");
+    Serial.println(statusAtual);
+
+    if (statusAtual != ultimoStatus) {
+      ultimoStatus = statusAtual;
+      String payload = "ID: " + String(lixeira_id) +
+                       ", Distância: " + String(distancia) +
+                       " cm, Status: " + statusAtual;
+      client.publish(mqtt_topic_send, payload.c_str());
+    }
+  }
 }
