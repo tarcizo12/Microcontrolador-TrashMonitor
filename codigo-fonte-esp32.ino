@@ -1,9 +1,10 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
+#include <time.h>
 
 // Dados da rede Wi-Fi
-const char* ssid = "brisa-1570583";
-const char* password = "uq1uyi0i";
+const char* ssid = "iPhone de Lucas";
+const char* password = "lucas1106";
 
 // Configuração do broker MQTT
 const char* mqtt_server = "broker.hivemq.com";
@@ -22,13 +23,17 @@ const int ledAmarelo = 19;
 const int ledVerde = 21;
 
 float distancia;
-String ultimoStatus = "";  // Status anterior da lixeira
+String ultimoStatus = "";
 
 WiFiClient espClient;
 PubSubClient client(espClient);
 
 unsigned long lastMeasureTime = 0;
 const unsigned long interval = 500; // intervalo entre leituras
+
+// Fuso horário de Brasília (UTC-3)
+const long gmtOffset_sec = -3 * 3600;
+const int daylightOffset_sec = 0;
 
 // Gera status com base na distância
 String obterStatus(float d) {
@@ -41,6 +46,18 @@ String obterStatus(float d) {
   }
 }
 
+// Obtém a data/hora atual formatada
+String obterDataHoraBrasilia() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    return "Erro ao obter hora";
+  }
+
+  char buffer[30];
+  strftime(buffer, sizeof(buffer), "%d/%m/%Y %H:%M:%S", &timeinfo);
+  return String(buffer);
+}
+
 // Callback para mensagens recebidas
 void callback(char* topic, byte* payload, unsigned int length) {
   String msg = "";
@@ -50,9 +67,11 @@ void callback(char* topic, byte* payload, unsigned int length) {
 
   if (String(topic) == mqtt_topic_receive && msg == "consultar") {
     String status = obterStatus(distancia);
-    String payload = "ID: " + String(lixeira_id) + 
-                     ", Distância: " + String(distancia) + 
-                     " cm, Status: " + status;
+    String dataHora = obterDataHoraBrasilia();
+    String payload = "ID: " + String(lixeira_id) +
+                     ", Distância: " + String(distancia) +
+                     " cm, Status: " + status +
+                     ", Data/Hora: " + dataHora;
     client.publish(mqtt_topic_send, payload.c_str());
   }
 }
@@ -67,6 +86,17 @@ void conectarWiFi() {
   Serial.println("\nConectado ao Wi-Fi!");
   Serial.print("IP local: ");
   Serial.println(WiFi.localIP());
+}
+
+void configurarNTP() {
+  configTime(gmtOffset_sec, daylightOffset_sec, "pool.ntp.org", "time.nist.gov");
+
+  struct tm timeinfo;
+  while (!getLocalTime(&timeinfo)) {
+    Serial.println("Aguardando sincronização NTP...");
+    delay(1000);
+  }
+  Serial.println("Hora sincronizada com sucesso.");
 }
 
 void conectarMQTT() {
@@ -121,6 +151,7 @@ void setup() {
   pinMode(echoPin, INPUT);
 
   conectarWiFi();
+  configurarNTP();
 
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(callback);
@@ -154,9 +185,11 @@ void loop() {
 
     if (statusAtual != ultimoStatus) {
       ultimoStatus = statusAtual;
+      String dataHora = obterDataHoraBrasilia();
       String payload = "ID: " + String(lixeira_id) +
                        ", Distância: " + String(distancia) +
-                       " cm, Status: " + statusAtual;
+                       " cm, Status: " + statusAtual +
+                       ", Data/Hora: " + dataHora;
       client.publish(mqtt_topic_send, payload.c_str());
     }
   }
